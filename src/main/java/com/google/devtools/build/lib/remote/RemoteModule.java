@@ -135,6 +135,7 @@ public final class RemoteModule extends BlazeModule {
       MoreExecutors.listeningDecorator(Executors.newScheduledThreadPool(1));
 
   private final Set<Digest> knownMissingCasDigests = Sets.newConcurrentHashSet();
+  private final Set<Digest> rejectedMetadataOnlyActionKeys = Sets.newConcurrentHashSet();
   private boolean useRemoteRepoContentsCache;
 
   @Nullable private PathFragment outputBase;
@@ -292,7 +293,8 @@ public final class RemoteModule extends BlazeModule {
             digestUtil,
             remoteOutputChecker,
             outputService,
-            knownMissingCasDigests);
+            knownMissingCasDigests,
+            rejectedMetadataOnlyActionKeys);
     actionInputFetcher = createActionInputFetcher(combinedCache);
   }
 
@@ -402,6 +404,7 @@ public final class RemoteModule extends BlazeModule {
 
     if ("clean".equals(env.getCommandName())) {
       knownMissingCasDigests.clear();
+      rejectedMetadataOnlyActionKeys.clear();
     }
 
     var cacheAvailable = setup(env);
@@ -486,7 +489,11 @@ public final class RemoteModule extends BlazeModule {
       // Quit if no remote caching or execution was enabled.
       actionContextProvider =
           RemoteActionContextProvider.createForPlaceholder(
-              env, retryScheduler, digestUtil, knownMissingCasDigests);
+              env,
+              retryScheduler,
+              digestUtil,
+              knownMissingCasDigests,
+              rejectedMetadataOnlyActionKeys);
       return false;
     }
 
@@ -809,7 +816,8 @@ public final class RemoteModule extends BlazeModule {
               logDir,
               remoteOutputChecker,
               outputService,
-              knownMissingCasDigests);
+              knownMissingCasDigests,
+              rejectedMetadataOnlyActionKeys);
     } else {
       if (enableDiskCache) {
         try {
@@ -835,7 +843,8 @@ public final class RemoteModule extends BlazeModule {
               digestUtil,
               remoteOutputChecker,
               outputService,
-              knownMissingCasDigests);
+              knownMissingCasDigests,
+              rejectedMetadataOnlyActionKeys);
     }
 
     actionInputFetcher = createActionInputFetcher(actionContextProvider.getCombinedCache());

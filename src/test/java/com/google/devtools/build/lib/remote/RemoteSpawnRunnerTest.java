@@ -1283,6 +1283,7 @@ public class RemoteSpawnRunnerTest {
             /* captureCorruptedOutputsDir= */ null,
             remoteOutputChecker,
             mock(OutputService.class),
+            Sets.newConcurrentHashSet(),
             Sets.newConcurrentHashSet());
     RemoteSpawnRunner runner =
         new RemoteSpawnRunner(
@@ -1820,6 +1821,7 @@ public class RemoteSpawnRunnerTest {
                 /* captureCorruptedOutputsDir= */ null,
                 remoteOutputChecker,
                 mock(OutputService.class),
+                Sets.newConcurrentHashSet(),
                 Sets.newConcurrentHashSet()));
 
     return new RemoteSpawnRunner(

@@ -51,6 +51,7 @@ final class RemoteActionContextProvider {
   @Nullable private final RemoteOutputChecker remoteOutputChecker;
   @Nullable private final OutputService outputService;
   private final Set<Digest> knownMissingCasDigests;
+  private final Set<Digest> rejectedMetadataOnlyActionKeys;
 
   private RemoteActionContextProvider(
       CommandEnvironment env,
@@ -61,7 +62,8 @@ final class RemoteActionContextProvider {
       @Nullable Path logDir,
       @Nullable RemoteOutputChecker remoteOutputChecker,
       @Nullable OutputService outputService,
-      Set<Digest> knownMissingCasDigests) {
+      Set<Digest> knownMissingCasDigests,
+      Set<Digest> rejectedMetadataOnlyActionKeys) {
     this.env = Preconditions.checkNotNull(env, "env");
     this.combinedCache = combinedCache;
     this.remoteExecutor = remoteExecutor;
@@ -71,13 +73,15 @@ final class RemoteActionContextProvider {
     this.remoteOutputChecker = remoteOutputChecker;
     this.outputService = outputService;
     this.knownMissingCasDigests = knownMissingCasDigests;
+    this.rejectedMetadataOnlyActionKeys = rejectedMetadataOnlyActionKeys;
   }
 
   public static RemoteActionContextProvider createForPlaceholder(
       CommandEnvironment env,
       ListeningScheduledExecutorService retryScheduler,
       DigestUtil digestUtil,
-      Set<Digest> knownMissingCasDigests) {
+      Set<Digest> knownMissingCasDigests,
+      Set<Digest> rejectedMetadataOnlyActionKeys) {
     return new RemoteActionContextProvider(
         env,
         /* combinedCache= */ null,
@@ -87,7 +91,8 @@ final class RemoteActionContextProvider {
         /* logDir= */ null,
         /* remoteOutputChecker= */ null,
         /* outputService= */ null,
-        knownMissingCasDigests);
+        knownMissingCasDigests,
+        rejectedMetadataOnlyActionKeys);
   }
 
   public static RemoteActionContextProvider createForRemoteCaching(
@@ -97,7 +102,8 @@ final class RemoteActionContextProvider {
       DigestUtil digestUtil,
       @Nullable RemoteOutputChecker remoteOutputChecker,
       OutputService outputService,
-      Set<Digest> knownMissingCasDigests) {
+      Set<Digest> knownMissingCasDigests,
+      Set<Digest> rejectedMetadataOnlyActionKeys) {
     return new RemoteActionContextProvider(
         env,
         combinedCache,
@@ -107,7 +113,8 @@ final class RemoteActionContextProvider {
         /* logDir= */ null,
         remoteOutputChecker,
         checkNotNull(outputService),
-        knownMissingCasDigests);
+        knownMissingCasDigests,
+        rejectedMetadataOnlyActionKeys);
   }
 
   public static RemoteActionContextProvider createForRemoteExecution(
@@ -119,7 +126,8 @@ final class RemoteActionContextProvider {
       Path logDir,
       @Nullable RemoteOutputChecker remoteOutputChecker,
       OutputService outputService,
-      Set<Digest> knownMissingCasDigests) {
+      Set<Digest> knownMissingCasDigests,
+      Set<Digest> rejectedMetadataOnlyActionKeys) {
     return new RemoteActionContextProvider(
         env,
         remoteCache,
@@ -129,7 +137,8 @@ final class RemoteActionContextProvider {
         logDir,
         remoteOutputChecker,
         checkNotNull(outputService),
-        knownMissingCasDigests);
+        knownMissingCasDigests,
+        rejectedMetadataOnlyActionKeys);
   }
 
   private RemotePathResolver createRemotePathResolver() {
@@ -183,7 +192,8 @@ final class RemoteActionContextProvider {
               captureCorruptedOutputsDir,
               remoteOutputChecker,
               outputService,
-              knownMissingCasDigests);
+              knownMissingCasDigests,
+              rejectedMetadataOnlyActionKeys);
       env.getEventBus().register(remoteExecutionService);
     }
 

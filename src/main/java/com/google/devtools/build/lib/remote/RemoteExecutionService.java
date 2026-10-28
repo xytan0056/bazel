@@ -111,6 +111,7 @@ import com.google.devtools.build.lib.remote.common.RemotePathResolver;
 import com.google.devtools.build.lib.remote.merkletree.MerkleTree;
 import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.remote.options.RemoteOptions.ConcurrentChangesCheckLevel;
+import com.google.devtools.build.lib.remote.options.RemoteOutputsMode;
 import com.google.devtools.build.lib.remote.salt.CacheSalt;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
@@ -157,6 +158,7 @@ import java.util.TreeSet;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -173,6 +175,9 @@ import javax.annotation.Nullable;
  * cache and execution with spawn specific types.
  */
 public class RemoteExecutionService {
+  private static final ByteString METADATA_ONLY_ACTION_SALT =
+      ByteString.copyFromUtf8("bazel.remote_cache_metadata_only.v1\u0000");
+
   private final Reporter reporter;
   private final boolean verboseFailures;
   private final Path execRoot;
@@ -209,6 +214,9 @@ public class RemoteExecutionService {
 
   @Nullable private final Scrubber scrubber;
   private final Set<Digest> knownMissingCasDigests;
+  private final Set<Digest> rejectedMetadataOnlyActionKeys;
+  private final Map<Digest, Set<Digest>> metadataOnlyActionKeysByOutputDigest =
+      new ConcurrentHashMap<>();
 
   private Boolean useOutputPaths;
 
@@ -228,7 +236,8 @@ public class RemoteExecutionService {
       @Nullable Path captureCorruptedOutputsDir,
       @Nullable RemoteOutputChecker remoteOutputChecker,
       OutputService outputService,
-      Set<Digest> knownMissingCasDigests) {
+      Set<Digest> knownMissingCasDigests,
+      Set<Digest> rejectedMetadataOnlyActionKeys) {
     this.reporter = reporter;
     this.verboseFailures = verboseFailures;
     this.execRoot = execRoot;
@@ -255,6 +264,7 @@ public class RemoteExecutionService {
     this.remoteOutputChecker = remoteOutputChecker;
     this.outputService = outputService;
     this.knownMissingCasDigests = knownMissingCasDigests;
+    this.rejectedMetadataOnlyActionKeys = rejectedMetadataOnlyActionKeys;
   }
 
   private Command buildCommand(
@@ -896,18 +906,62 @@ public class RemoteExecutionService {
             action.getActionKey(),
             /* inlineOutErr= */ false,
             inlineOutputFiles);
+    Digest acceptedMetadataOnlyActionKey = null;
+
+    if (cachedActionResult == null
+        && action.getRemoteActionExecutionContext().getReadCachePolicy().allowRemoteCache()
+        && shouldUseMetadataOnlyRecord(action)) {
+      ActionKey metadataActionKey = metadataOnlyActionKey(action);
+      if (!rejectedMetadataOnlyActionKeys.contains(metadataActionKey.getDigest())) {
+        RemoteActionExecutionContext metadataContext =
+            action
+                .getRemoteActionExecutionContext()
+                .withReadCachePolicy(CachePolicy.REMOTE_CACHE_ONLY);
+        CachedActionResult metadataRecord =
+            combinedCache.downloadActionResult(
+                metadataContext,
+                metadataActionKey,
+                /* inlineOutErr= */ false,
+                ImmutableSet.of());
+        if (metadataRecord != null && metadataRecord.actionResult().hasStdoutDigest()) {
+          try {
+            ActionResult outputMetadata =
+                ActionResult.parseFrom(
+                    getFromFuture(
+                        combinedCache.downloadBlob(
+                            metadataContext,
+                            /* blobName= */ "metadata-only action result",
+                            /* execPath= */ null,
+                            metadataRecord.actionResult().getStdoutDigest())));
+            if (!rejectedMetadataOnlyActionKeys.contains(metadataActionKey.getDigest())) {
+              cachedActionResult =
+                  new CachedActionResult(outputMetadata, metadataRecord.cacheName());
+              acceptedMetadataOnlyActionKey = metadataActionKey.getDigest();
+            }
+          } catch (IOException e) {
+            report(
+                Event.warn(
+                    "remote cache: invalid metadata-only action result mnemonic="
+                        + action.getSpawn().getMnemonic()
+                        + ": "
+                        + e.getMessage()));
+          }
+        }
+      }
+    }
 
     if (cachedActionResult == null) {
       return null;
     }
 
     var result = RemoteActionResult.createFromCache(cachedActionResult);
+    ActionResultMetadata metadata = null;
 
     // We only add digests to `knownMissingCasDigests` when LostInputsEvent occurs which will cause
     // the build to abort and rewind, so there is no data race here. This allows us to avoid the
     // check until cache eviction happens.
     if (!knownMissingCasDigests.isEmpty()) {
-      var metadata =
+      metadata =
           result.getOrParseActionResultMetadata(
               combinedCache,
               digestUtil,
@@ -924,7 +978,40 @@ public class RemoteExecutionService {
       }
     }
 
+    if (acceptedMetadataOnlyActionKey != null) {
+      if (metadata == null) {
+        metadata =
+            result.getOrParseActionResultMetadata(
+                combinedCache,
+                digestUtil,
+                action.getRemoteActionExecutionContext(),
+                action.getRemotePathResolver());
+      }
+      rememberMetadataOnlyOutputs(acceptedMetadataOnlyActionKey, metadata);
+    }
+
     return result;
+  }
+
+  private boolean shouldUseMetadataOnlyRecord(RemoteAction action) {
+    return remoteOptions.remoteOutputsMode == RemoteOutputsMode.MINIMAL
+        && action
+            .getSpawn()
+            .getExecutionInfo()
+            .containsKey(ExecutionRequirements.NO_REMOTE_CACHE_OUTPUT_UPLOAD)
+        && getInMemoryOutputPath(action.getSpawn()) == null;
+  }
+
+  private Action metadataOnlyAction(RemoteAction action) {
+    return action
+        .getAction()
+        .toBuilder()
+        .setSalt(METADATA_ONLY_ACTION_SALT.concat(action.getAction().getSalt()))
+        .build();
+  }
+
+  private ActionKey metadataOnlyActionKey(RemoteAction action) {
+    return digestUtil.computeActionKey(metadataOnlyAction(action));
   }
 
   /**
@@ -948,6 +1035,25 @@ public class RemoteExecutionService {
       }
     }
     return result;
+  }
+
+  private void rememberMetadataOnlyOutputs(
+      Digest metadataOnlyActionKey, ActionResultMetadata metadata) {
+    for (var file : metadata.files()) {
+      rememberMetadataOnlyOutput(metadataOnlyActionKey, file.digest());
+    }
+    for (var entry : metadata.directories()) {
+      for (var file : entry.getValue().files()) {
+        rememberMetadataOnlyOutput(metadataOnlyActionKey, file.digest());
+      }
+    }
+  }
+
+  @VisibleForTesting
+  void rememberMetadataOnlyOutput(Digest metadataOnlyActionKey, Digest outputDigest) {
+    metadataOnlyActionKeysByOutputDigest
+        .computeIfAbsent(outputDigest, unused -> ConcurrentHashMap.newKeySet())
+        .add(metadataOnlyActionKey);
   }
 
   private ListenableFuture<FileMetadata> downloadFile(
@@ -1912,6 +2018,25 @@ public class RemoteExecutionService {
     try (SilentCloseable c =
         Profiler.instance().profile(ProfilerTask.UPLOAD_TIME, "upload outputs")) {
       UploadManifest manifest = buildUploadManifest(action, spawnResult);
+      if (shouldUseMetadataOnlyRecord(action)) {
+        RemoteActionExecutionContext context = action.getRemoteActionExecutionContext();
+        if (context.getWriteCachePolicy().allowDiskCache()) {
+          manifest.upload(
+              context.withWriteCachePolicy(CachePolicy.DISK_CACHE_ONLY), combinedCache, reporter);
+        }
+        if (!context.getWriteCachePolicy().allowRemoteCache()) {
+          return;
+        }
+        Action metadataAction = metadataOnlyAction(action);
+        ActionKey metadataActionKey = digestUtil.computeActionKey(metadataAction);
+        manifest.uploadMetadataOnly(
+            context.withWriteCachePolicy(CachePolicy.REMOTE_CACHE_ONLY),
+            combinedCache,
+            reporter,
+            metadataAction,
+            metadataActionKey);
+        return;
+      }
       var unused =
           manifest.upload(action.getRemoteActionExecutionContext(), combinedCache, reporter);
     } catch (IOException e) {
@@ -2101,13 +2226,21 @@ public class RemoteExecutionService {
       // If build succeeded, clear knownMissingCasDigests in case there are missing digests from
       // other targets from previous builds which are not relevant anymore.
       knownMissingCasDigests.clear();
+      rejectedMetadataOnlyActionKeys.clear();
+      metadataOnlyActionKeysByOutputDigest.clear();
     }
   }
 
   @Subscribe
   public void onLostInputs(LostInputsEvent event) {
     for (String digest : event.missingDigests()) {
-      knownMissingCasDigests.add(DigestUtil.fromString(digest));
+      Digest missingDigest = DigestUtil.fromString(digest);
+      knownMissingCasDigests.add(missingDigest);
+      Set<Digest> metadataOnlyActionKeys =
+          metadataOnlyActionKeysByOutputDigest.get(missingDigest);
+      if (metadataOnlyActionKeys != null) {
+        rejectedMetadataOnlyActionKeys.addAll(metadataOnlyActionKeys);
+      }
     }
   }
 

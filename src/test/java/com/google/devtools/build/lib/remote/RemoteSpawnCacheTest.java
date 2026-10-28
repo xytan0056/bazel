@@ -328,6 +328,7 @@ public class RemoteSpawnCacheTest {
                 /* captureCorruptedOutputsDir= */ null,
                 DUMMY_REMOTE_OUTPUT_CHECKER,
                 mock(OutputService.class),
+                Sets.newConcurrentHashSet(),
                 Sets.newConcurrentHashSet()));
     return new RemoteSpawnCache(
         execRoot, options, /* verboseFailures= */ true, service, digestUtil);

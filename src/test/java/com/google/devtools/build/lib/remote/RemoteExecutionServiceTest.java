@@ -100,6 +100,7 @@ import com.google.devtools.build.lib.remote.CombinedCache.CachedActionResult;
 import com.google.devtools.build.lib.remote.RemoteExecutionService.RemoteActionResult;
 import com.google.devtools.build.lib.remote.RemoteScrubbing.Config;
 import com.google.devtools.build.lib.remote.common.BulkTransferException;
+import com.google.devtools.build.lib.remote.common.LostInputsEvent;
 import com.google.devtools.build.lib.remote.common.RemoteActionExecutionContext;
 import com.google.devtools.build.lib.remote.common.RemoteExecutionClient;
 import com.google.devtools.build.lib.remote.common.RemotePathResolver;
@@ -135,6 +136,7 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -240,6 +242,40 @@ public class RemoteExecutionServiceTest {
     RequestMetadata metadata =
         TracingMetadataUtils.buildMetadata("none", "none", "action-id", null);
     remoteActionExecutionContext = RemoteActionExecutionContext.create(metadata);
+  }
+
+  @Test
+  public void lostMetadataOnlyOutput_alsoRejectsMetadataRecord() {
+    Set<Digest> knownMissingCasDigests = Sets.newConcurrentHashSet();
+    Set<Digest> rejectedMetadataOnlyActionKeys = Sets.newConcurrentHashSet();
+    RemoteExecutionService service =
+        newRemoteExecutionService(
+            remoteOptions, knownMissingCasDigests, rejectedMetadataOnlyActionKeys);
+    Digest metadataOnlyActionKey = digestUtil.computeAsUtf8("metadata action");
+    Digest outputDigest = digestUtil.computeAsUtf8("output");
+    service.rememberMetadataOnlyOutput(metadataOnlyActionKey, outputDigest);
+
+    service.onLostInputs(
+        new LostInputsEvent(ImmutableSet.of(DigestUtil.toString(outputDigest))));
+
+    assertThat(rejectedMetadataOnlyActionKeys).containsExactly(metadataOnlyActionKey);
+    assertThat(knownMissingCasDigests).containsExactly(outputDigest);
+  }
+
+  @Test
+  public void ordinaryLostInput_usesOrdinaryInvalidation() {
+    Set<Digest> knownMissingCasDigests = Sets.newConcurrentHashSet();
+    Set<Digest> rejectedMetadataOnlyActionKeys = Sets.newConcurrentHashSet();
+    RemoteExecutionService service =
+        newRemoteExecutionService(
+            remoteOptions, knownMissingCasDigests, rejectedMetadataOnlyActionKeys);
+    Digest outputDigest = digestUtil.computeAsUtf8("output");
+
+    service.onLostInputs(
+        new LostInputsEvent(ImmutableSet.of(DigestUtil.toString(outputDigest))));
+
+    assertThat(knownMissingCasDigests).containsExactly(outputDigest);
+    assertThat(rejectedMetadataOnlyActionKeys).isEmpty();
   }
 
   @Test
@@ -2702,6 +2738,14 @@ public class RemoteExecutionServiceTest {
   }
 
   private RemoteExecutionService newRemoteExecutionService(RemoteOptions remoteOptions) {
+    return newRemoteExecutionService(
+        remoteOptions, Sets.newConcurrentHashSet(), Sets.newConcurrentHashSet());
+  }
+
+  private RemoteExecutionService newRemoteExecutionService(
+      RemoteOptions remoteOptions,
+      Set<Digest> knownMissingCasDigests,
+      Set<Digest> rejectedMetadataOnlyActionKeys) {
     return new RemoteExecutionService(
         reporter,
         /* verboseFailures= */ true,
@@ -2718,7 +2762,8 @@ public class RemoteExecutionServiceTest {
         null,
         remoteOutputChecker,
         outputService,
-        Sets.newConcurrentHashSet());
+        knownMissingCasDigests,
+        rejectedMetadataOnlyActionKeys);
   }
 
   private RunfilesTree createRunfilesTree(String root, Collection<Artifact> artifacts) {
